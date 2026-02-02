@@ -198,8 +198,107 @@ class JumiaRetailScraper:
         # Run within session guard to handle browser crashes
         self._session_guard(_inner)
         return found_links
-
     def extract_reviews(self, product_url, category):
+        """Scrape all customer reviews for a single product."""
+        self.logger.info(f"[SCRAPE] Product: {product_url}")
+
+        def _inner():
+            # Navigate to the product page
+            self.browser.get(product_url)
+            self._random_delay(1.5, 3)
+
+            # --- UPDATED LOGIC: Locate and click the 'See All' reviews link ---
+            try:
+                # Match both old and new review URL patterns
+                see_all = self.wait.until(EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//a[((contains(@href, '/reviews/') or "
+                    "contains(@href, '/catalog/productratingsreviews/sku/')) "
+                    "and contains(text(), 'See All'))]"
+                )))
+
+                # Scroll into view to ensure clickability
+                self.browser.execute_script("arguments[0].scrollIntoView(true);", see_all)
+                self._random_delay(1, 2)
+
+                # Use JS click fallback to avoid interception
+                try:
+                    see_all.click()
+                except Exception:
+                    self.browser.execute_script("arguments[0].click();", see_all)
+
+                self.logger.info("Clicked 'See All' reviews link successfully.")
+                self._random_delay(2, 3)
+
+            except TimeoutException:
+                # If link not found, log and skip
+                self.logger.warning("Could not locate 'See All' reviews button for this product.")
+                return
+
+            # --- PAGINATION LOOP: Scrape all pages of reviews ---
+            while True:
+                try:
+                    # Wait until at least one review block is present
+                    self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "article")))
+                    soup = BeautifulSoup(self.browser.page_source, "html.parser")
+
+                    # Each review is an <article> element
+                    reviews = soup.find_all("article")
+
+                    for rev in reviews:
+                        # Extract rating stars
+                        rating = 0
+                        stars_div = rev.find("div", class_="stars")
+                        if stars_div:
+                            for cls in stars_div.get("class", []):
+                                if cls.startswith("_") and cls[1:].isdigit():
+                                    rating = int(cls[1:])
+
+                        # Check verified badge
+                        verified = bool(rev.find(text="Verified Purchase") or rev.find("div", class_="bdg _vrf"))
+
+                        # Reviewer name
+                        user_name = "Anonymous"
+                        meta_info = rev.find("div", class_="-hr -pvs")
+                        if meta_info:
+                            spans = meta_info.find_all("span")
+                            if spans:
+                                user_name = spans[0].get_text(strip=True).replace("by ", "")
+
+                        # Timestamp and review text
+                        date_val = rev.find("span", class_="-df -i-ctr -fs12 -pts")
+                        timestamp = date_val.get_text(strip=True) if date_val else "N/A"
+                        text_body = rev.find("p", class_="-pvs")
+                        review_text = text_body.get_text(strip=True) if text_body else ""
+
+                        # Append review data
+                        self.results.append({
+                            "Category": category,
+                            "Product_URL": product_url,
+                            "User_Name": user_name,
+                            "Rating": rating,
+                            "Timestamp": timestamp,
+                            "Verified_Badge": verified,
+                            "Review_Text": review_text
+                        })
+
+                    # --- NEXT PAGE HANDLING ---
+                    try:
+                        next_btn = self.browser.find_element(By.CSS_SELECTOR, "a.pg[aria-label='Next Page']")
+                        self.browser.execute_script("arguments[0].scrollIntoView(true);", next_btn)
+                        self._random_delay(1, 2)
+                        next_btn.click()
+                        self._random_delay(1.5, 3)
+                    except (NoSuchElementException, ElementClickInterceptedException):
+                        break  # No more review pages
+                except Exception as e:
+                    self.logger.error(f"Review extraction loop error: {e}")
+                    break
+
+        # Run with session guard so it restarts driver if the session dies
+        self._session_guard(_inner)
+
+
         """Scrape all customer reviews for a single product."""
         self.logger.info(f"[SCRAPE] Product: {product_url}")
 
