@@ -15,446 +15,337 @@ from selenium.common.exceptions import (
     TimeoutException,
     NoSuchElementException,
     ElementClickInterceptedException,
-    UnexpectedAlertPresentException,
     InvalidSessionIdException,
-    WebDriverException
+    WebDriverException,
+    StaleElementReferenceException
 )
-
 
 class JumiaRetailScraper:
     """
-    A fully self-healing, stealth-optimized, headless scraper for Jumia Nigeria.
-    Handles invalid WebDriver sessions, auto-restarts, popups, and exports reviews by category.
+    Enterprise-grade scraper for Jumia Nigeria.
+    
+    Architectural Highlights:
+    - Namespace-Agnostic Pagination: Uses ARIA labels instead of SVG attributes.
+    - SPA Awareness: Handles dynamic DOM updates and stale elements.
+    - Anti-Bot Stealth: Uses CDP injection and randomized human-like delays.
+    - Robust I/O: Atomic write operations for CSV data safety.
     """
 
     def __init__(self, driver_path, user_agent):
-        # Save initialization parameters
         self.driver_path = driver_path
         self.user_agent = user_agent
-
-        # Temporary buffer for storing scraped reviews
-        self.results = []
-
-        # Browser and WebDriverWait objects will be initialized later
+        self.results = []   # Storage for scraped review data
         self.browser = None
         self.wait = None
 
-        # ---------- LOGGING CONFIGURATION ----------
-        # Create a folder for logs if not present
+        # --- Setup Logging ---
         os.makedirs("logs", exist_ok=True)
-
-        # Configure logging to file + console
         logging.basicConfig(
-            filename="logs/jumia_scraper.log",   # Log file name
-            filemode="a",                        # Append mode
-            level=logging.INFO,                  # Logging level
+            filename="logs/jumia_scraper.log",
+            filemode="a",
+            level=logging.INFO,
             format="%(asctime)s [%(levelname)s]: %(message)s"
         )
         self.logger = logging.getLogger()
-
-        # Initialize the browser immediately when scraper is created
+        
+        # --- Initialize the browser ---
         self._init_browser()
 
     def _init_browser(self):
-        """Initialize Edge WebDriver in stealth + headless mode."""
+        """
+        Initializes Microsoft Edge WebDriver with stealth configuration
+        and human-like behaviors.
+        """
         try:
-            # Close existing browser instance if already running
             if self.browser:
                 try:
                     self.browser.quit()
                 except Exception:
                     pass
 
-            self.logger.info("Starting new Edge WebDriver session...")
+            self.logger.info("Initializing Stealth Edge WebDriver session...")
 
-            # ---------- EDGE OPTIONS ----------
             edge_options = Options()
-            edge_options.add_argument(f"user-agent={self.user_agent}")  # Custom user-agent
+            edge_options.add_argument(f"user-agent={self.user_agent}")
+            edge_options.add_argument("--disable-blink-features=AutomationControlled")  # Stealth
             edge_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-            edge_options.add_argument("--disable-blink-features=AutomationControlled")  # Hide automation flag
-            edge_options.add_argument("--disable-features=RendererCodeIntegrity")       # Avoid rendering crashes
-            edge_options.add_argument("--disable-infobars")
-            edge_options.add_argument("--no-sandbox")
-            edge_options.add_argument("--disable-dev-shm-usage")
+            edge_options.add_argument("--headless=new")  # Run headless
             edge_options.add_argument("--disable-gpu")
+            edge_options.add_argument("--window-size=1920,1080")
             edge_options.add_argument("--disable-extensions")
-            edge_options.add_argument("--disable-notifications")
-            edge_options.add_argument("--log-level=3")               # Suppress ChromeDriver logs
-            edge_options.add_argument("--headless=new")              # Run in headless mode (no GUI)
-            edge_options.add_argument("--window-size=1920,1080")     # Ensure full page loads
 
-            # Disable SmartScreen and safe browsing popups
-            prefs = {
-                "safebrowsing.enabled": False,
-                "safebrowsing.disable_download_protection": True,
-                "profile.block_third_party_cookies": True
-            }
-            edge_options.add_experimental_option("prefs", prefs)
-
-            # ---------- SERVICE ----------
-            # Direct EdgeDriver logs to null to avoid console spam
+            # Initialize WebDriver service
             service = Service(executable_path=self.driver_path, log_path=os.devnull)
-
-            # Launch the browser
             self.browser = webdriver.Edge(service=service, options=edge_options)
 
-            # Inject JavaScript to spoof navigator properties (anti-detection)
+            # CDP injection: hides the 'navigator.webdriver' property
             self.browser.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                "source": """
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4]});
-                """
+                "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             })
 
-            # Explicit wait for dynamic elements
-            self.wait = WebDriverWait(self.browser, 15)
-            self.logger.info("Edge WebDriver initialized successfully.")
+            self.wait = WebDriverWait(self.browser, 20)  # Increased timeout
+            self.logger.info("WebDriver initialized successfully.")
 
         except WebDriverException as e:
-            self.logger.error(f"Failed to start WebDriver: {e}")
+            self.logger.critical(f"Fatal WebDriver Initialization Error: {e}")
             raise
 
-    def _random_delay(self, low=1.2, high=3.5):
-        """Add randomized sleep intervals to mimic human browsing."""
+    def _random_delay(self, low=2.0, high=5.0):
+        """Adds randomized human-like delays to avoid bot detection."""
         time.sleep(random.uniform(low, high))
 
     def _session_guard(self, func, *args, **kwargs):
         """
-        Wraps Selenium operations to catch 'InvalidSessionIdException'.
-        If browser crashes, re-initialize and retry once.
+        Auto-retries function calls if WebDriver session crashes.
         """
-        try:
-            return func(*args, **kwargs)
-        except InvalidSessionIdException:
-            self.logger.error("WebDriver session lost. Restarting browser...")
-            self._init_browser()
+        max_retries = 2
+        for attempt in range(max_retries + 1):
             try:
                 return func(*args, **kwargs)
+            except (InvalidSessionIdException, WebDriverException) as e:
+                if attempt < max_retries:
+                    self.logger.warning(f"Session crash detected ({e}). Re-initializing (Attempt {attempt+1})...")
+                    self._init_browser()
+                    time.sleep(5)
+                else:
+                    self.logger.error(f"Operation failed after {max_retries} retries: {e}")
+                    return None
             except Exception as e:
-                self.logger.error(f"Retry failed after reinit: {e}")
+                self.logger.error(f"Unexpected error: {e}")
+                traceback.print_exc()
                 return None
 
     def navigate_home_and_clear_popups(self):
-        """Open Jumia home page and close popups like newsletter and cookie consent."""
+        """Navigates to homepage and closes popups like cookies and newsletters."""
         def _inner():
             self.logger.info("Navigating to Jumia homepage...")
             self.browser.get("https://www.jumia.com.ng")
-            self._random_delay(2, 4)
+            self._random_delay(3, 5)
 
-            # Try to dismiss browser alerts (if any)
+            # --- Close Newsletter Popups ---
             try:
-                alert = self.browser.switch_to.alert
-                self.logger.warning(f"Unexpected alert detected: {alert.text}")
-                alert.accept()
-            except Exception:
+                close_btn = self.wait.until(EC.element_to_be_clickable((
+                    By.XPATH, "//button[contains(@aria-label, 'close') or contains(@class, 'cls')]"
+                )))
+                close_btn.click()
+                self.logger.info("Popup dismissed.")
+            except TimeoutException:
+                self.logger.debug("No newsletter popup found.")
+
+            # --- Accept Cookies ---
+            try:
+                cookie_btn = self.wait.until(EC.element_to_be_clickable((
+                    By.XPATH, "//button[contains(text(), 'Accept') or @id='cookies-accept-all']"
+                )))
+                cookie_btn.click()
+                self.logger.info("Cookies accepted.")
+            except TimeoutException:
                 pass
 
-            # Close the newsletter modal popup if present
-            try:
-                newsletter_close = self.wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//button[@aria-label='newsletter_popup_close-cta'] | //div[contains(@class, 'cls')]")
-                ))
-                newsletter_close.click()
-                self.logger.info("Newsletter popup closed successfully.")
-            except TimeoutException:
-                self.logger.info("No newsletter popup detected.")
-
-            # Accept cookie consent if banner is visible
-            try:
-                cookie_accept = self.wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//button[@id='cookies-accept-all'] | //button[contains(text(), 'Accept')]")
-                ))
-                cookie_accept.click()
-                self.logger.info("Cookie consent accepted.")
-            except TimeoutException:
-                self.logger.info("Cookie consent not found or already dismissed.")
-
-        # Run inside session guard for auto-retry safety
         self._session_guard(_inner)
 
     def discover_products(self, cat_name):
-        """Extracts product URLs from a category page."""
+        """Scrapes product URLs from a category listing page."""
         found_links = []
-
         def _inner():
-            # Wait until product grid loads
             self.wait.until(EC.presence_of_element_located((By.CLASS_NAME, "prd")))
-            soup = BeautifulSoup(self.browser.page_source, "html.parser")
 
-            # Extract product <a> tags
-            for art in soup.find_all("article", class_="prd"):
-                tag = art.find("a", class_="core")
-                if tag and tag.get("href"):
-                    url = tag["href"]
-                    # Convert relative path to absolute URL
-                    if url.startswith("/"):
-                        url = "https://www.jumia.com.ng" + url
-                    found_links.append(url)
+            # Execute JS for faster extraction
+            links = self.browser.execute_script("""
+                var links = [];
+                document.querySelectorAll('article.prd a.core').forEach(a => links.push(a.href));
+                return links;
+            """)
+            found_links.extend(links)
+            self.logger.info(f"Found {len(links)} products in '{cat_name}'")
 
-            self.logger.info(f"Found {len(found_links)} product URLs in category '{cat_name}'")
-
-        # Run within session guard to handle browser crashes
         self._session_guard(_inner)
         return found_links
+
     def extract_reviews(self, product_url, category):
-        """Scrape all customer reviews for a single product."""
-        self.logger.info(f"[SCRAPE] Product: {product_url}")
+        """
+        Main review extraction logic.
+        Fixes NamespaceError by using ARIA labels for pagination.
+        """
+        self.logger.info(f"[Processing] {product_url}")
 
         def _inner():
-            # Navigate to the product page
             self.browser.get(product_url)
-            self._random_delay(1.5, 3)
+            self._random_delay(2, 4)
 
-            # --- UPDATED LOGIC: Locate and click the 'See All' reviews link ---
+            # --- Click 'See All Reviews' ---
             try:
-                # Match both old and new review URL patterns
                 see_all = self.wait.until(EC.element_to_be_clickable((
-                    By.XPATH,
-                    "//a[((contains(@href, '/reviews/') or "
-                    "contains(@href, '/catalog/productratingsreviews/sku/')) "
-                    "and contains(text(), 'See All'))]"
+                    By.PARTIAL_LINK_TEXT, "See All"
                 )))
-
-                # Scroll into view to ensure clickability
-                self.browser.execute_script("arguments[0].scrollIntoView(true);", see_all)
-                self._random_delay(1, 2)
-
-                # Use JS click fallback to avoid interception
+                # Scroll into view & click safely
+                self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", see_all)
+                self._random_delay(1, 1.5)
                 try:
                     see_all.click()
-                except Exception:
+                except ElementClickInterceptedException:
                     self.browser.execute_script("arguments[0].click();", see_all)
-
-                self.logger.info("Clicked 'See All' reviews link successfully.")
-                self._random_delay(2, 3)
-
             except TimeoutException:
-                # If link not found, log and skip
-                self.logger.warning("Could not locate 'See All' reviews button for this product.")
+                self.logger.warning("No 'See All Reviews' link found. Skipping.")
                 return
 
-            # --- PAGINATION LOOP: Scrape all pages of reviews ---
+            page_num = 1
+            total_collected = 0
+
             while True:
                 try:
-                    # Wait until at least one review block is present
-                    self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "article")))
+                    self.wait.until(EC.presence_of_all_elements_located((By.TAG_NAME, "article")))
                     soup = BeautifulSoup(self.browser.page_source, "html.parser")
-
-                    # Each review is an <article> element
                     reviews = soup.find_all("article")
+                    if not reviews:
+                        break
 
+                    # --- Extract Review Data ---
                     for rev in reviews:
-                        # Extract rating stars
-                        rating = 0
+                        # Rating extraction
+                        rating = "N/A"
                         stars_div = rev.find("div", class_="stars")
                         if stars_div:
-                            for cls in stars_div.get("class", []):
-                                if cls.startswith("_") and cls[1:].isdigit():
-                                    rating = int(cls[1:])
+                            rating = stars_div.get_text(strip=True).split(" ")
 
-                        # Check verified badge
-                        verified = bool(rev.find(text="Verified Purchase") or rev.find("div", class_="bdg _vrf"))
+                        # Title & body
+                        review_title = rev.find("h3").get_text(strip=True) if rev.find("h3") else ""
+                        review_text = rev.find("p", class_="-pvs").get_text(strip=True) if rev.find("p", class_="-pvs") else ""
 
-                        # Reviewer name
-                        user_name = "Anonymous"
-                        meta_info = rev.find("div", class_="-hr -pvs")
-                        if meta_info:
-                            spans = meta_info.find_all("span")
-                            if spans:
-                                user_name = spans[0].get_text(strip=True).replace("by ", "")
+                        # Meta info: date & username
+                        date_val, user_name = "N/A", "Anonymous"
+                        meta_section = rev.find("div", class_="-pvs")
+                        if meta_section:
+                            spans = meta_section.find_all("span")
+                            if len(spans) >= 2:
+                                date_val = spans[0].get_text(strip=True)
+                                user_name = spans[1].get_text(strip=True).replace("by ", "")
+                            elif len(spans) == 1:
+                                date_val = spans[0].get_text(strip=True)
 
-                        # Timestamp and review text
-                        date_val = rev.find("span", class_="-df -i-ctr -fs12 -pts")
-                        timestamp = date_val.get_text(strip=True) if date_val else "N/A"
-                        text_body = rev.find("p", class_="-pvs")
-                        review_text = text_body.get_text(strip=True) if text_body else ""
+                        verified = "Verified Purchase" in rev.get_text()
 
-                        # Append review data
+                        # Append to results
                         self.results.append({
                             "Category": category,
                             "Product_URL": product_url,
                             "User_Name": user_name,
                             "Rating": rating,
-                            "Timestamp": timestamp,
-                            "Verified_Badge": verified,
-                            "Review_Text": review_text
+                            "Review_Title": review_title,
+                            "Review_Text": review_text,
+                            "Timestamp": date_val,
+                            "Verified_Badge": verified
                         })
+                        total_collected += 1
 
-                    # --- NEXT PAGE HANDLING ---
+                    self.logger.info(f"Page {page_num}: Extracted {len(reviews)} reviews.")
+
+                    # Autosave every 50 reviews
+                    if total_collected % 50 == 0:
+                        self._autosave(category, total_collected)
+
+                    # --- Pagination using ARIA label ---
                     try:
-                        next_btn = self.browser.find_element(By.CSS_SELECTOR, "a.pg[aria-label='Next Page']")
-                        self.browser.execute_script("arguments[0].scrollIntoView(true);", next_btn)
+                        next_btn = self.browser.find_element(By.CSS_SELECTOR, "a[aria-label='Next Page']")
+                        if not next_btn.is_displayed():
+                            self.logger.info("Next button hidden. Pagination complete.")
+                            break
+
+                        self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_btn)
                         self._random_delay(1, 2)
-                        next_btn.click()
-                        self._random_delay(1.5, 3)
-                    except (NoSuchElementException, ElementClickInterceptedException):
-                        break  # No more review pages
+                        self.browser.execute_script("arguments[0].click();", next_btn)
+
+                        # Wait for old articles to become stale
+                        try:
+                            old_elem = self.browser.find_elements(By.TAG_NAME, "article")
+                            self.wait.until(EC.staleness_of(old_elem[0]))
+                        except Exception:
+                            time.sleep(3)
+
+                        page_num += 1
+                        self._random_delay(2, 4)
+
+                    except NoSuchElementException:
+                        self.logger.info("No 'Next Page' button found. Pagination complete.")
+                        break
+
+                except StaleElementReferenceException:
+                    self.logger.warning(f"Stale element on page {page_num}. Retrying loop...")
+                    continue
                 except Exception as e:
-                    self.logger.error(f"Review extraction loop error: {e}")
+                    self.logger.error(f"Error on page {page_num}: {e}")
                     break
 
-        # Run with session guard so it restarts driver if the session dies
+            # Final save
+            self._autosave(category, total_collected)
+
         self._session_guard(_inner)
 
-
-        """Scrape all customer reviews for a single product."""
-        self.logger.info(f"[SCRAPE] Product: {product_url}")
-
-        def _inner():
-            # Open product page
-            self.browser.get(product_url)
-            self._random_delay(1.5, 3)
-
-            # Try to open the "See All Reviews" section
-            try:
-                see_all = self.wait.until(EC.element_to_be_clickable(
-                    (By.XPATH, "//a[contains(@href, '/reviews/')]")
-                ))
-                see_all.click()
-                self._random_delay(1.5, 3)
-            except TimeoutException:
-                self.logger.info("No 'See All Reviews' button found for this product.")
-                return
-
-            # Loop through all review pages (pagination)
-            while True:
-                self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "article")))
-                soup = BeautifulSoup(self.browser.page_source, "html.parser")
-                reviews = soup.find_all("article", class_="-pvs -border _pld")
-
-                # Extract individual reviews
-                for rev in reviews:
-                    # Default rating is 0
-                    rating = 0
-                    stars_div = rev.find("div", class_="stars")
-                    if stars_div:
-                        for cls in stars_div.get("class", []):
-                            if cls.startswith("_") and cls[1:].isdigit():
-                                rating = int(cls[1:])
-
-                    # Check for "Verified Purchase" badge
-                    verified = bool(rev.find(text="Verified Purchase") or rev.find("div", class_="bdg _vrf"))
-
-                    # Extract username (if available)
-                    user_name = "Anonymous"
-                    meta_info = rev.find("div", class_="-hr -pvs")
-                    if meta_info:
-                        spans = meta_info.find_all("span")
-                        if spans:
-                            user_name = spans[0].get_text(strip=True).replace("by ", "")
-
-                    # Extract timestamp and review text
-                    date_val = rev.find("span", class_="-df -i-ctr -fs12 -pts")
-                    timestamp = date_val.get_text(strip=True) if date_val else "N/A"
-                    text_body = rev.find("p", class_="-pvs")
-                    review_text = text_body.get_text(strip=True) if text_body else ""
-
-                    # Append to results
-                    self.results.append({
-                        "Category": category,
-                        "Product_URL": product_url,
-                        "User_Name": user_name,
-                        "Rating": rating,
-                        "Timestamp": timestamp,
-                        "Verified_Badge": verified,
-                        "Review_Text": review_text
-                    })
-
-                # Try to move to next page of reviews
-                try:
-                    next_btn = self.browser.find_element(By.CSS_SELECTOR, "a.pg[aria-label='Next Page']")
-                    self.browser.execute_script("arguments[0].scrollIntoView(true);", next_btn)
-                    self._random_delay(1, 2)
-                    next_btn.click()
-                    self._random_delay(1.5, 3)
-                except (NoSuchElementException, ElementClickInterceptedException):
-                    break  # Exit loop if no next page found
-
-        # Run with session guard to auto-restart browser if needed
-        self._session_guard(_inner)
-
-    def export_data(self, category):
-        """Save scraped reviews to a CSV file per category."""
-        if not self.results:
-            self.logger.warning(f"No reviews collected for category '{category}'")
-            return
-
-        os.makedirs("data", exist_ok=True)
-        filename = f"data/jumia_reviews_{category.lower().replace(' ', '_')}.csv"
-
-        # Convert to DataFrame and export
-        df = pd.DataFrame(self.results)
-        df.to_csv(filename, index=False)
-        self.logger.info(f"Exported {len(df)} reviews to {filename}")
-
-        # Clear results after export to avoid duplicates
-        self.results.clear()
+    def _autosave(self, category, count):
+        """Safely saves results to CSV."""
+        try:
+            os.makedirs("data", exist_ok=True)
+            filename = f"data/jumia_reviews_{category.replace(' ', '_')}.csv"
+            df = pd.DataFrame(self.results)
+            temp_filename = filename + ".tmp"
+            df.to_csv(temp_filename, index=False)
+            if os.path.exists(filename):
+                os.remove(filename)
+            os.rename(temp_filename, filename)
+            self.logger.info(f"Autosaved {count} reviews.")
+        except Exception as e:
+            self.logger.error(f"Save failed: {e}")
 
     def shutdown(self):
-        """Safely close the WebDriver instance."""
-        try:
-            if self.browser:
-                self.browser.quit()
-        except InvalidSessionIdException:
-            self.logger.warning("Browser session already terminated.")
-        self.logger.info("Edge browser closed successfully.")
+        """Gracefully quits the browser."""
+        if self.browser:
+            self.browser.quit()
+        self.logger.info("Scraper Shutdown Complete.")
 
 
+# ---------------- Main Orchestration ----------------
 def run_scraper():
-    """Main entry point for the scraper with auto-restart logic."""
-    #  USER CONFIG 
     PATH_TO_DRIVER = r"C:\Users\OLALERE\Desktop\Books\edgedriver_win64\msedgedriver.exe"
-    MY_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0"
+    MY_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0"
+    )
 
-    # Define categories to scrape
     TARGET_CATEGORIES = {
         "Mobile Phones": "https://www.jumia.com.ng/mobile-phones/",
         "Computing": "https://www.jumia.com.ng/computing/",
         "Electronics": "https://www.jumia.com.ng/electronics/"
     }
 
-    # AUTO-RESTART LOOP 
     while True:
         try:
-            # Initialize scraper
             jumia_bot = JumiaRetailScraper(PATH_TO_DRIVER, MY_USER_AGENT)
             jumia_bot.navigate_home_and_clear_popups()
 
-            # Loop through each category
             for cat_name, cat_url in TARGET_CATEGORIES.items():
-                jumia_bot.logger.info(f"--- Starting category: {cat_name} ---")
+                jumia_bot.logger.info(f"--- Scraping category: {cat_name} ---")
                 jumia_bot._session_guard(jumia_bot.browser.get, cat_url)
+                product_links = jumia_bot.discover_products(cat_name)
 
-                # Discover product links
-                links = jumia_bot.discover_products(cat_name)
-
-                # Iterate over products
-                for i, link in enumerate(links):
+                for i, link in enumerate(product_links):
                     jumia_bot.extract_reviews(link, cat_name)
 
-                    # Refresh browser every 20 products for stability
-                    if i % 20 == 0:
-                        jumia_bot.logger.info("Refreshing Edge session to prevent timeouts...")
+                    # Re-initialize browser every 20 products to avoid timeouts
+                    if i % 20 == 0 and i != 0:
+                        jumia_bot.logger.info("Refreshing browser session for stability...")
                         jumia_bot._init_browser()
 
-                # Export category data
-                jumia_bot.export_data(cat_name)
-
-            # Graceful shutdown when all categories complete
             jumia_bot.shutdown()
-            break  # Exit loop
+            break
 
         except Exception as e:
-            # Catch any unexpected error and restart after a delay
             logging.error(f"Fatal error, restarting scraper: {e}")
             traceback.print_exc()
-            if 'bot' in locals():
+            try:
                 jumia_bot.shutdown()
-
-            # Wait 1–3 minutes before restarting
-            delay = random.randint(60, 180)
+            except Exception:
+                pass
+            delay = random.randint(60, 120)
             logging.info(f"Restarting after {delay} seconds...")
             time.sleep(delay)
 
