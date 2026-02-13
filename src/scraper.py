@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import dotenv
 import time
 import random
 import logging
@@ -19,7 +20,7 @@ from selenium.common.exceptions import (
     WebDriverException,
     StaleElementReferenceException
 )
-
+dotenv.load_dotenv()  # Load environment variables from .env file
 class JumiaRetailScraper:
     """
     Enterprise-grade scraper for Jumia Nigeria.
@@ -305,11 +306,8 @@ class JumiaRetailScraper:
 
 # ---------------- Main Orchestration ----------------
 def run_scraper():
-    PATH_TO_DRIVER = r"C:\Users\OLALERE\Desktop\Books\edgedriver_win64\msedgedriver.exe"
-    MY_USER_AGENT = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 Edg/144.0.0.0"
-    )
+    PATH_TO_DRIVER = os.getenv("DRIVER")
+    MY_USER_AGENT = os.getenv("AGENT")
 
     TARGET_CATEGORIES = {
         "Mobile Phones": "https://www.jumia.com.ng/mobile-phones/",

@@ -15,4 +15,3 @@ seaborn
 plotly
 tqdm
 openpyxl
-

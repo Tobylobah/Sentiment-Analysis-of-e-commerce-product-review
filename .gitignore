@@ -1,3 +1,7 @@
 /data.
 /models.
 /notebooks. 
+/data/raw/
+/data/processed/
+/data/interim/
+.env
