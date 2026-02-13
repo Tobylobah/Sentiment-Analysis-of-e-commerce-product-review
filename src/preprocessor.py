@@ -5,96 +5,136 @@ from datetime import datetime
 import os
 import dotenv
 
-# Load spaCy for expert-level lemmatization and tokenization
+# --- Load environment variables from .env file ---
+dotenv.load_dotenv()
+
+# --- Initialize spaCy NLP model ---
 try:
     nlp = spacy.load("en_core_web_sm")
-except:
-    import os
+except OSError:
+    # Automatically download if not found
     os.system("python -m spacy download en_core_web_sm")
     nlp = spacy.load("en_core_web_sm")
 
+
 class JumiaPreprocessor:
+    """
+    Preprocessing pipeline for Jumia Nigeria product reviews.
+    - Loads multiple category CSVs from environment variable
+    - Cleans, normalizes, and enriches text data for ML/NLP tasks
+    """
+
     def __init__(self, input_files):
         """
-        input_files: List of paths to your category CSVs 
-        (e.g., ['mobile.csv', 'computing.csv', 'electronics.csv'])
+        input_files: list of paths to CSVs (from .env FILES variable)
+        Example in .env:
+        FILES=data/jumia_reviews_mobile_phones.csv,data/jumia_reviews_computing.csv,data/jumia_reviews_electronics.csv
         """
         self.input_files = input_files
         self.df = None
 
     def load_and_merge(self):
-        """Merges multiple category files while preserving the category label.[4, 5]"""
+        """Load and merge multiple category files into one dataframe."""
         frames = []
         for file in self.input_files:
+            file = file.strip()
+            if not os.path.exists(file):
+                print(f"[WARN] File not found: {file}")
+                continue
             temp_df = pd.read_csv(file)
             frames.append(temp_df)
+
+        if not frames:
+            raise FileNotFoundError("No valid CSV files found in FILES environment variable.")
+
         self.df = pd.concat(frames, ignore_index=True)
-        print(f"[INFO] Loaded {len(self.df)} total raw records.")
+        print(f"[INFO] Loaded {len(self.df)} total raw records from {len(frames)} files.")
 
     def clean_structure(self):
-        """Standard data cleaning: deduplication and null handling.[4, 5]"""
-        # Remove exact duplicates from scraping retries
+        """Handle duplicates, missing values, and basic structure cleanup."""
         initial_count = len(self.df)
+
+        # Remove exact duplicates
         self.df.drop_duplicates(inplace=True)
-        
-        # Essential: Drop rows without review text as they cannot be used for sentiment
+
+        # Drop rows missing review text
         self.df.dropna(subset=['Review_Text'], inplace=True)
-        
-        # Fill missing usernames with 'Anonymous' to track reviewer history [1, 6]
+
+        # Fill missing usernames
         self.df['User_Name'] = self.df['User_Name'].fillna('Anonymous')
-        
-        print(f"[INFO] Cleaned structure. Removed {initial_count - len(self.df)} records.")
+
+        print(f"[INFO] Cleaned structure. Removed {initial_count - len(self.df)} duplicates or empty reviews.")
 
     def format_features(self):
-        """Standardizes data types for mathematical modeling.[4, 7]"""
-        # 1. Rating: Ensure discrete integer 1-5 [7, 8]
-        self.df = pd.to_numeric(self.df, errors='coerce').fillna(0).astype(int)
-        
-        # 2. Verified Badge: Convert to Boolean [6, 3]
-        # Jumia badges often appear as "Verified Purchase" string or a specific class presence
-        self.df = self.df.apply(
+        """Standardize data types and prepare for modeling."""
+        # 1. Convert ratings to integer (handle string values like '5 out of 5')
+        self.df['Rating'] = (
+            self.df['Rating']
+            .astype(str)
+            .str.extract(r'(\d+)')  # extract numeric part
+            .fillna(0)
+            .astype(int)
+        )
+
+        # 2. Convert verified badge text to Boolean
+        self.df['Verified_Badge'] = self.df['Verified_Badge'].apply(
             lambda x: True if str(x).lower() in ['true', '1', 'verified purchase'] else False
         )
 
-        # 3. Timestamp: Critical for Burst Detection [1, 3]
-        # Jumia Nigeria typically uses DD-MM-YYYY
-        self.df = pd.to_datetime(self.df, dayfirst=True, errors='coerce')
-        self.df.dropna(subset=['Timestamp'], inplace=True) # Remove rows with invalid dates
+        # 3. Parse timestamp column (Jumia uses DD-MM-YYYY)
+        self.df['Timestamp'] = pd.to_datetime(self.df['Timestamp'], dayfirst=True, errors='coerce')
+        self.df.dropna(subset=['Timestamp'], inplace=True)
+
+        print("[INFO] Formatted features: Ratings -> int, Verified_Badge -> bool, Timestamp -> datetime.")
 
     def normalize_text(self, text):
-        """Advanced NLP cleaning for the Nigerian e-commerce context.[9, 2]"""
-        if not isinstance(text, str): return ""
-        
-        # Lowercase and remove noise
+        """Apply deep text normalization for sentiment/NLP analysis."""
+        if not isinstance(text, str):
+            return ""
+
+        # Lowercase and remove punctuation
         text = text.lower()
-        text = re.sub(r'[^\w\s]', '', text) # Remove punctuation [9]
-        
-        # Reduce character repetition (e.g., "greeeeat" -> "great") [2]
+        text = re.sub(r'[^\w\s]', '', text)
+
+        # Reduce long character repetitions (e.g., 'goooood' → 'good')
         text = re.sub(r'(.)\1{2,}', r'\1', text)
-        
-        # Lemmatization (reducing words to their root form)
+
+        # Lemmatize and remove stopwords using spaCy
         doc = nlp(text)
         tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_space]
         return " ".join(tokens)
 
     def process_nlp(self):
-        """Applies normalization and creates analytical metrics.[9, 3]"""
-        print("[INFO] Starting NLP normalization (this may take a minute)...")
-        # Create metrics before cleaning text to preserve original 'effort' indicators
-        self.df = self.df.apply(len)
-        self.df = self.df.apply(lambda x: len(str(x).split()))
-        
-        # Apply the deep cleaning
-        self.df = self.df.apply(self.normalize_text)
+        """Run text normalization and create derived text metrics."""
+        print("[INFO] Starting NLP normalization — this may take several minutes...")
+
+        # Pre-NLP text length metrics
+        self.df['Text_Length'] = self.df['Review_Text'].apply(lambda x: len(str(x)))
+        self.df['Word_Count'] = self.df['Review_Text'].apply(lambda x: len(str(x).split()))
+
+        # Normalize text content
+        self.df['Cleaned_Text'] = self.df['Review_Text'].apply(self.normalize_text)
+
+        print("[INFO] NLP normalization complete. Added 'Text_Length', 'Word_Count', and 'Cleaned_Text'.")
 
     def save_data(self, output_name="cleaned_jumia_reviews.csv"):
-        self.df.to_csv(output_name, index=False)
-        print(f" Preprocessed data saved to {output_name}")
+        """Save the fully processed dataset."""
+        os.makedirs("data", exist_ok=True)
+        output_path = os.path.join("data", output_name)
+        self.df.to_csv(output_path, index=False)
+        print(f"[SUCCESS] Preprocessed data saved to {output_path}")
+
 
 if __name__ == "__main__":
-    # Update these filenames to match your scraped output
-    files = os.getenv("FILES").split(", ")S
-    
+    # --- Load CSV file list from .env variable ---
+    raw_files = os.getenv("FILES")  # e.g. "data/jumia_reviews_mobile_phones.csv,data/jumia_reviews_computing.csv"
+    if not raw_files:
+        raise ValueError("FILES variable not found in environment. Please define it in your .env file.")
+
+    # Convert comma-separated list to Python list
+    files = [f.strip() for f in raw_files.split(",") if f.strip()]
+
+    # --- Run the pipeline ---
     preprocessor = JumiaPreprocessor(files)
     preprocessor.load_and_merge()
     preprocessor.clean_structure()
