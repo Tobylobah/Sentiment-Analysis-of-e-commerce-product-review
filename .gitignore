@@ -5,3 +5,8 @@
 /data/processed/
 /data/interim/
 .env
+src/__pycache__/
+src/data/
+src/logs/
+src/test.py
+venv/
